@@ -17,9 +17,12 @@
 #include "ns3/wifi-mac-queue.h"
 #include "ns3/wifi-protection.h"
 #include "ns3/wifi-psdu.h"
+#include "ns3/string.h"
+#include "ns3/wifi-phy.h"
 
 #include <algorithm>
 #include <numeric>
+#include <sstream>
 
 namespace ns3
 {
@@ -83,7 +86,14 @@ RrMultiUserScheduler::GetTypeId()
                 "duration (in microseconds) times the allocated bandwidth share",
                 TimeValue(Seconds(1)),
                 MakeTimeAccessor(&RrMultiUserScheduler::m_maxCredits),
-                MakeTimeChecker());
+                MakeTimeChecker())
+            .AddAttribute(
+                "StaticPuncturedSubchannels",
+                "TEMPORARY: comma-separated indices of 20 MHz subchannels to be excluded "
+                "from the DL MU PPDU. An empty string disables the mechanism.",
+                          StringValue(""),
+                          MakeStringAccessor(&RrMultiUserScheduler::m_staticPuncturing),
+                          MakeStringChecker());
     return tid;
 }
 
@@ -748,6 +758,18 @@ RrMultiUserScheduler::TrySendingDlMuPpdu()
 {
     NS_LOG_FUNCTION(this);
 
+    m_puncturedSubchannels.clear();
+    if (!m_staticPuncturing.empty())
+    {
+        const auto fullWidth = m_apMac->GetWifiPhy(m_linkId)->GetChannelWidth();
+        if (fullWidth >= MHz_u{80})
+        {
+            //transmit over the full width, punctured subchannels are excluded by the mask
+            m_allowedWidth = fullWidth;
+            UpdateStaticPuncturing(fullWidth);
+        }
+    }
+
     AcIndex primaryAc = m_edca->GetAccessCategory();
 
     if (m_staListDl[primaryAc].empty())
@@ -794,6 +816,10 @@ RrMultiUserScheduler::TrySendingDlMuPpdu()
     m_txParams.m_txVector.SetChannelWidth(m_allowedWidth);
     m_txParams.m_txVector.SetGuardInterval(heConfiguration->GetGuardInterval());
     m_txParams.m_txVector.SetBssColor(heConfiguration->m_bssColor);
+    if (!m_puncturedSubchannels.empty())
+    {
+        m_txParams.m_txVector.SetInactiveSubchannels(m_puncturedSubchannels);
+    }
 
     // The TXOP holder may exceed the TXOP limit only if it does not transmit more than one Data
     // or Management frame in the TXOP, only if it does not transmit a DL MU-MIMO PPDU in the TXOP
@@ -933,6 +959,23 @@ RrMultiUserScheduler::FinalizeTxVector(WifiTxVector& txVector)
     // printing them will crash the simulation
     NS_LOG_FUNCTION(this);
     NS_ASSERT(txVector.GetHeMuUserInfoMap().size() == m_candidates.size());
+    if (!m_puncturedSubchannels.empty())
+    {
+        NS_ABORT_MSG_IF(!IsEht(txVector.GetPreambleType()), "Minimum option: only EHT");
+        const auto rus = GetRusAvoidingPuncturing();
+        WifiTxVector::HeMuUserInfoMap userInfos;
+        std::swap(userInfos, txVector.GetHeMuUserInfoMap());
+        auto candidateIt = m_candidates.begin();
+        for (std::size_t i = 0; i < rus.size() && candidateIt != m_candidates.end();
+             ++i, ++candidateIt)
+        {
+            const auto it = userInfos.find(candidateIt->first->aid);
+            NS_ASSERT(it != userInfos.end());
+            txVector.SetHeMuUserInfo(it->first, {rus[i], it->second.mcs, it->second.nss});
+        }
+        m_candidates.erase(candidateIt, m_candidates.end()); // кому не хватило RU, ждёт
+        return;
+    }
 
     // compute how many stations can be granted an RU and the RU size
     std::size_t nRusAssigned = m_candidates.size();
@@ -981,6 +1024,58 @@ RrMultiUserScheduler::FinalizeTxVector(WifiTxVector& txVector)
 
     // remove candidates that will not be served
     m_candidates.erase(candidateIt, m_candidates.end());
+}
+
+void
+RrMultiUserScheduler::UpdateStaticPuncturing(MHz_u channelWidth)
+{
+    const auto p20 =
+        m_apMac->GetWifiPhy(m_linkId)->GetOperatingChannel().GetPrimaryChannelIndex(MHz_u{20});
+    m_puncturedSubchannels.assign(Count20MHzSubchannels(channelWidth), false);
+    std::stringstream ss(m_staticPuncturing);
+    for (std::string item; std::getline(ss, item, ',');)
+    {
+        if (item.empty())
+        {
+            continue;
+        }
+        const auto idx = std::stoul(item);
+        NS_ABORT_MSG_IF(idx >= m_puncturedSubchannels.size(), "Subchannel outside the channel band");
+        NS_ABORT_MSG_IF(idx == p20, "Primary 20 MHz cannot be excluded");
+        m_puncturedSubchannels[idx] = true;
+    }
+}
+
+std::vector<WifiRu::RuSpec>
+RrMultiUserScheduler::GetRusAvoidingPuncturing() const
+{
+    NS_ABORT_MSG_IF(m_puncturedSubchannels.size() != 4, "only 80 MHz");
+    std::vector<WifiRu::RuSpec> rus;
+    for (std::size_t half = 0; half < 2; ++half)
+    {
+        const std::size_t lo = 2 * half;
+        const std::size_t hi = lo + 1;
+        if (!m_puncturedSubchannels[lo] && !m_puncturedSubchannels[hi])
+        {
+            rus.emplace_back(EhtRu::RuSpec{RuType::RU_484_TONE, half + 1, true, true});
+            continue;
+        }
+        for (const auto i : {lo, hi})
+        {
+            if (!m_puncturedSubchannels[i])
+            {
+                rus.emplace_back(EhtRu::RuSpec{RuType::RU_242_TONE, i + 1, true, true});
+            }
+        }
+    }
+
+    // large RU are first to get
+    std::stable_sort(rus.begin(), rus.end(), [](const auto& a, const auto& b) {
+        return WifiRu::GetBandwidth(WifiRu::GetRuType(a)) >
+               WifiRu::GetBandwidth(WifiRu::GetRuType(b));
+    });
+
+    return rus;
 }
 
 void

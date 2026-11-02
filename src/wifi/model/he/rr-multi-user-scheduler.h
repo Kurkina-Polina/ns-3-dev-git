@@ -173,6 +173,16 @@ class WIFI_EXPORT RrMultiUserScheduler : public MultiUserScheduler
                        const WifiTxVector& txVector);
 
     /**
+     * @param channelWidth
+     */
+    void UpdateStaticPuncturing(MHz_u channelWidth); //TODO: it is temporary static puncturing
+
+    /**
+     * @return list of RU
+     */
+    std::vector<WifiRu::RuSpec> GetRusAvoidingPuncturing() const;  //TODO: it is temporary static puncturing
+
+    /**
      * Information stored for candidate stations
      */
     typedef std::pair<std::list<MasterInfo>::iterator, Ptr<WifiMpdu>> CandidateInfo;
@@ -193,6 +203,8 @@ class WIFI_EXPORT RrMultiUserScheduler : public MultiUserScheduler
     WifiMacHeader m_triggerMacHdr;         //!< MAC header for Trigger Frame
     Time m_triggerTxDuration{0};           //!< Trigger Frame TX duration
     WifiTxParameters m_txParams;           //!< TX parameters
+    std::string m_staticPuncturing;           //!< temporary number of static puncturing
+    std::vector<bool> m_puncturedSubchannels; //!< mask, 0 = the lowest 20 MGz
 };
 
 } // namespace ns3
