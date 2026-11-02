@@ -1,0 +1,17 @@
+{
+  "args": {
+    "widths": [
+      80,
+      160,
+      320
+    ],
+    "mcs": 7,
+    "repeats": 5,
+    "sim_time": 2.0,
+    "max_subch": 4,
+    "tag": ""
+  },
+  "git": "418210e89",
+  "scenario": "punct-stand",
+  "when": "20261015-133147"
+}
